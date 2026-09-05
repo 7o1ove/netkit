@@ -1,31 +1,49 @@
 #!/usr/bin/env bash
 # Sourced by netkit.sh; do not execute directly.
 
+SSHD_CONFIG_FILE="/etc/ssh/sshd_config"
+
 require_sshd_environment(){
-    if ! require_commands awk sed systemctl; then
+    if ! require_commands awk sed systemctl sshd mktemp; then
         return 1
     fi
 
-    if [[ ! -r /etc/ssh/sshd_config ]]; then
-        error "未找到 SSHD 配置：/etc/ssh/sshd_config。"
+    if [[ ! -r "$SSHD_CONFIG_FILE" ]]; then
+        error "未找到 SSHD 配置：${SSHD_CONFIG_FILE}。"
         return 1
     fi
 
     return 0
 }
 
-current_ssh_port(){
-    awk '
-        /^[[:space:]]*Port[[:space:]]+[0-9]+/ {
-            print $2
+sshd_effective_config(){
+    local config_file="${1:-$SSHD_CONFIG_FILE}"
+
+    sshd -T -f "$config_file"
+}
+
+sshd_config_field(){
+    local field="${1,,}"
+    awk -v field="$field" '
+        tolower($1) == field && !seen[$2]++ {
+            printf "%s%s", separator, $2
+            separator=","
             found=1
-            exit
         }
         END {
-            if (!found)
-                print 22
+            if (!found) exit 1
+            print ""
         }
-    ' /etc/ssh/sshd_config
+    '
+}
+
+current_ssh_port(){
+    local effective
+
+    if ! effective=$(sshd_effective_config); then
+        return 1
+    fi
+    sshd_config_field port <<< "$effective"
 }
 
 restart_ssh_service(){
@@ -41,34 +59,60 @@ restart_ssh_service(){
 
 set_sshd_options(){
     local new_config=""
-    local key
+    local option key expected actual effective temp_config
 
-    for key in "$@"; do
-        if ! sed -i "/^[#[:space:]]*${key%%=*}[[:space:]]/d" /etc/ssh/sshd_config; then
-            return 1
-        fi
-        new_config+="${key%%=*} ${key#*=}"$'\n'
+    for option in "$@"; do
+        new_config+="${option%%=*} ${option#*=}"$'\n'
     done
 
-    if ! awk -v CONFIG="$new_config" '
-/^[[:space:]]*Match/ && !DONE {
+    if ! temp_config=$(mktemp "${SSHD_CONFIG_FILE}.netkit.XXXXXX"); then
+        return 1
+    fi
+    # 在 Include 之前写入全局选项；只清理主文件的同名全局项，保留 Match 块。
+    if ! cp -p "$SSHD_CONFIG_FILE" "$temp_config" || \
+       ! awk -v CONFIG="$new_config" '
+BEGIN {
+    count=split(CONFIG, lines, "\n")
+    for (i=1; i<=count; i++) {
+        split(lines[i], fields, /[[:space:]]+/)
+        keys[tolower(fields[1])]=1
+    }
     printf "%s", CONFIG
-    DONE=1
 }
 {
+    key=tolower($1)
+    if (key == "match") in_match=1
+    if (!in_match && key in keys) next
     print
 }
-END {
-    if (!DONE)
-        printf "%s", CONFIG
-}
-' /etc/ssh/sshd_config > /etc/ssh/sshd_config.tmp; then
-        rm -f /etc/ssh/sshd_config.tmp
+' "$SSHD_CONFIG_FILE" > "$temp_config"; then
+        rm -f -- "$temp_config"
         return 1
     fi
 
-    if ! mv /etc/ssh/sshd_config.tmp /etc/ssh/sshd_config; then
-        rm -f /etc/ssh/sshd_config.tmp
+    if ! sshd -t -f "$temp_config" || ! effective=$(sshd_effective_config "$temp_config"); then
+        error "SSHD 配置校验失败，原配置未修改。"
+        rm -f -- "$temp_config"
+        return 1
+    fi
+    for option in "$@"; do
+        key="${option%%=*}"
+        expected="${option#*=}"
+        actual=$(sshd_config_field "$key" <<< "$effective") || actual=""
+        # OpenSSH -T 可能使用旧名称输出这个等价选项。
+        if [[ "${key,,}" == permitrootlogin ]]; then
+            [[ "$actual" != without-password ]] || actual=prohibit-password
+            [[ "$expected" != without-password ]] || expected=prohibit-password
+        fi
+        if [[ "$actual" != "$expected" ]]; then
+            error "${key} 校验不一致：期望 ${expected}，实际 ${actual:-未读取到}。请检查 Include 或重复配置；原配置未修改。"
+            rm -f -- "$temp_config"
+            return 1
+        fi
+    done
+
+    if ! mv -- "$temp_config" "$SSHD_CONFIG_FILE"; then
+        rm -f -- "$temp_config"
         return 1
     fi
 }
@@ -88,10 +132,17 @@ show_ssh_status(){
     local service_status
     local key_status
 
-    ssh_port=$(current_ssh_port)
-    password_auth=$(awk 'tolower($1)=="passwordauthentication"{v=$2} END{print v ? v : "default"}' /etc/ssh/sshd_config)
-    pubkey_auth=$(awk 'tolower($1)=="pubkeyauthentication"{v=$2} END{print v ? v : "default"}' /etc/ssh/sshd_config)
-    root_login=$(awk 'tolower($1)=="permitrootlogin"{v=$2} END{print v ? v : "default"}' /etc/ssh/sshd_config)
+    local effective
+    if ! effective=$(sshd_effective_config); then
+        error "无法读取 SSHD 有效配置，请先检查配置错误。"
+        pause
+        return 0
+    fi
+    ssh_port=$(sshd_config_field port <<< "$effective") || ssh_port="未知"
+    password_auth=$(sshd_config_field passwordauthentication <<< "$effective") || password_auth="未知"
+    pubkey_auth=$(sshd_config_field pubkeyauthentication <<< "$effective") || pubkey_auth="未知"
+    root_login=$(sshd_config_field permitrootlogin <<< "$effective") || root_login="未知"
+    info "以下为 sshd 解析后的全局配置（含 Include）；Match 条件可能覆盖登录策略。"
     service_status=$(systemctl is-active ssh 2>/dev/null || systemctl is-active sshd 2>/dev/null || echo "unknown")
 
     if [[ -s /root/.ssh/authorized_keys ]]; then
@@ -128,7 +179,16 @@ set_ssh_port(){
     fi
 
     local old_ssh_port
-    old_ssh_port=$(current_ssh_port)
+    if ! old_ssh_port=$(current_ssh_port); then
+        error "无法读取 SSHD 有效端口，原配置未修改。"
+        pause
+        return 0
+    fi
+    if [[ "$old_ssh_port" == *,* ]]; then
+        error "当前配置了多个 SSH 端口（${old_ssh_port}），请先手动整理端口配置。"
+        pause
+        return 0
+    fi
 
     if [[ "$ssh_port" != "$old_ssh_port" ]] && \
        ss -ltnH | awk '{print $4}' | grep -q ":${ssh_port}$"; then
@@ -169,43 +229,95 @@ set_ssh_port(){
 }
 
 set_ssh_key(){
+    local public_key
+    local key_dir="/root/.ssh"
+    local config_file="$SSHD_CONFIG_FILE"
+    local temp_key backup_dir
+    local had_keys=0
+    local restored=1
+
     header "设置 SSH 密钥"
 
-    if ! require_sshd_environment; then
+    if ! require_sshd_environment || ! require_commands ssh-keygen sshd mktemp; then
         pause
-        return
+        return 0
     fi
 
     read -e -r -p "$(prompt_text "请输入 SSH 公钥（输入 0 取消）: ")" public_key
+    public_key=$(trim_edges "$public_key")
     cancel_input "$public_key" && return
 
     if [[ -z "$public_key" ]]; then
         error "SSH 公钥不能为空。"
         pause
-        return
+        return 0
     fi
 
-    mkdir -p /root/.ssh
-    chmod 700 /root/.ssh
-    echo "$public_key" > /root/.ssh/authorized_keys
-    chmod 600 /root/.ssh/authorized_keys
+    # 只接受单行 OpenSSH 公钥，避免将私钥或其他可解析文件当作公钥。
+    if [[ ! "$public_key" =~ ^(ssh-|ecdsa-|sk-)[^[:space:]]+[[:space:]]+[A-Za-z0-9+/]+={0,3}([[:space:]].*)?$ ]]; then
+        error "SSH 公钥格式无效，请粘贴完整的单行 OpenSSH 公钥。"
+        pause
+        return 0
+    fi
 
-    if ! set_sshd_options \
+    if ! temp_key=$(mktemp); then
+        error "无法创建公钥校验临时文件。"
+        pause
+        return 0
+    fi
+    if ! printf '%s\n' "$public_key" > "$temp_key" || \
+       ! ssh-keygen -l -f "$temp_key" >/dev/null 2>&1; then
+        rm -f -- "$temp_key"
+        error "SSH 公钥无效或不完整，现有密钥和登录设置未修改。"
+        pause
+        return 0
+    fi
+    rm -f -- "$temp_key"
+
+    if ! mkdir -p "$key_dir" || ! chmod 700 "$key_dir" || \
+       ! backup_dir=$(mktemp -d "${key_dir}/.netkit-key-backup.XXXXXX"); then
+        error "无法创建 SSH 密钥备份目录。"
+        pause
+        return 0
+    fi
+    [[ -e "${key_dir}/authorized_keys" ]] && had_keys=1
+    if ! cp -p "$config_file" "${backup_dir}/sshd_config" || \
+       { (( had_keys == 1 )) && ! cp -p "${key_dir}/authorized_keys" "${backup_dir}/authorized_keys"; }; then
+        error "SSH 配置备份失败，现有密钥和登录设置未修改。"
+        pause
+        return 0
+    fi
+
+    # 保留已有公钥；即使新密钥尚未在另一终端验证，旧密钥仍可登录。
+    if ! { grep -qxF -- "$public_key" "${key_dir}/authorized_keys" 2>/dev/null ||
+           printf '\n%s\n' "$public_key" >> "${key_dir}/authorized_keys"; } || \
+       ! chmod 600 "${key_dir}/authorized_keys" || \
+       ! set_sshd_options \
         "PasswordAuthentication=no" \
         "PubkeyAuthentication=yes" \
-        "PermitRootLogin=prohibit-password"; then
-        error "SSHD 配置写入失败。"
+        "PermitRootLogin=prohibit-password" || \
+       ! sshd -t -f "$config_file" || ! restart_ssh_service; then
+        cp -p "${backup_dir}/sshd_config" "$config_file" || restored=0
+        if (( had_keys == 1 )); then
+            cp -p "${backup_dir}/authorized_keys" "${key_dir}/authorized_keys" || restored=0
+        else
+            rm -f -- "${key_dir}/authorized_keys" || restored=0
+        fi
+        if (( restored == 1 )); then
+            error "SSH 密钥设置失败，已恢复原密钥和 SSHD 配置。"
+            if ! restart_ssh_service; then
+                error "原配置已恢复，但 SSH 服务重启失败，请检查服务状态。"
+            fi
+        else
+            error "SSH 密钥设置失败，自动恢复不完整，请使用备份恢复。"
+        fi
+        path_kv "备份目录:" "$backup_dir"
         pause
-        return
+        return 0
     fi
 
-    if ! restart_ssh_service; then
-        error "SSH 服务重启失败，请检查 SSHD 配置和服务状态。"
-        pause
-        return
-    fi
-
-    success "SSH 密钥已设置，密码登录已关闭。"
+    success "SSH 公钥已校验并添加，原有公钥已保留，全局密码登录配置已关闭。"
+    path_kv "备份目录:" "$backup_dir"
     pause
 }
 

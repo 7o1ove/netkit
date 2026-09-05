@@ -4,7 +4,7 @@
 install_fail2ban(){
     header "安装 Fail2Ban"
 
-    if ! require_commands systemctl awk; then
+    if ! require_commands systemctl awk sshd; then
         pause
         return
     fi
@@ -21,7 +21,11 @@ install_fail2ban(){
     fi
 
     local ssh_port
-    ssh_port=$(current_ssh_port)
+    if ! ssh_port=$(current_ssh_port); then
+        error "无法读取 SSHD 有效端口，Fail2Ban 配置未修改。"
+        pause
+        return 0
+    fi
 
     cat > /etc/fail2ban/jail.local <<EOF
 [DEFAULT]

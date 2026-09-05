@@ -47,7 +47,7 @@ ufw_batch_add_port(){
     read -e -r -p "$(prompt_text "请输入要允许的端口（多个用空格分隔，输入 0 取消）: ")" input
     cancel_input "$input" && return
     [[ -z "$input" ]] && error "端口不能为空。" && pause && return
-    reject_comma_separator "$input" || return
+    reject_comma_separator "$input" || return 0
 
     for port in $(split_items "$input"); do
         valid_port "$port" || { error "端口无效: ${port}"; pause; return; }
@@ -209,7 +209,7 @@ ufw_batch_add_ip(){
     read -e -r -p "$(prompt_text "请输入要允许的 IP/CIDR（多个用空格分隔，输入 0 取消）: ")" input
     cancel_input "$input" && return
     [[ -z "$input" ]] && error "IP 不能为空。" && pause && return
-    reject_comma_separator "$input" || return
+    reject_comma_separator "$input" || return 0
 
     for ip in $(split_items "$input"); do
         [[ "$ip" =~ ^[0-9]+$ ]] && error "这是端口，不是 IP: ${ip}" && pause && return
@@ -239,7 +239,7 @@ ufw_batch_delete_ip(){
     read -e -r -p "$(prompt_text "请输入要删除的 IP/CIDR（多个用空格分隔，输入 0 取消）: ")" input
     cancel_input "$input" && return
     [[ -z "$input" ]] && error "IP 不能为空。" && pause && return
-    reject_comma_separator "$input" || return
+    reject_comma_separator "$input" || return 0
 
     for ip in $(split_items "$input"); do
         [[ "$ip" =~ ^[0-9]+$ ]] && error "这是端口，不是 IP: ${ip}" && pause && return
