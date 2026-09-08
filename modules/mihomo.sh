@@ -2,7 +2,7 @@
 # Sourced by netkit.sh; do not execute directly.
 
 MIHOMO_INSTALL_SCRIPT="${SCRIPT_DIR}/core/mihomo-core.sh"
-MIHOMO_VLESS_SCRIPT="${SCRIPT_DIR}/core/mihomo-vless-reality.sh"
+MIHOMO_ANYTLS_SCRIPT="${SCRIPT_DIR}/core/mihomo-anytls.sh"
 MIHOMO_SS_SCRIPT="${SCRIPT_DIR}/core/mihomo-shadowsocks.sh"
 MIHOMO_HY2_SCRIPT="${SCRIPT_DIR}/core/mihomo-hysteria2.sh"
 MIHOMO_HY2_HOP_SCRIPT="${SCRIPT_DIR}/core/mihomo-hysteria2-port-hopping.sh"
@@ -17,6 +17,7 @@ MIHOMO_HY2_HOP_START="20000"
 MIHOMO_HY2_HOP_END="50000"
 MIHOMO_HY2_HOP_STATE="${MIHOMO_DIR}/hysteria2-port-hopping.range"
 MIHOMO_HY2_SELF_SIGNED_DIR="${MIHOMO_DIR}/certs/hysteria2-selfsigned"
+MIHOMO_ANYTLS_SELF_SIGNED_DIR="${MIHOMO_DIR}/certs/anytls-selfsigned"
 MIHOMO_HY2_MASQUERADE_DIR="${MIHOMO_DIR}/masquerade"
 
 SELECTED_VERSION=""
@@ -104,12 +105,12 @@ show_client_info(){
 
     section "Mihomo" "$GREEN"
     echo
-    section "VLESS + TCP + XTLS Vision + REALITY" "$YELLOW"
+    section "AnyTLS" "$YELLOW"
     echo
-    if [[ -f "${MIHOMO_CLIENT_DIR}/vless.txt" ]]; then
+    if [[ -f "${MIHOMO_CLIENT_DIR}/anytls.txt" ]]; then
         while IFS= read -r line; do
-            if [[ "$line" == "VLESS Link:" ]]; then
-                label " VLESS Link"
+            if [[ "$line" == "AnyTLS Link:" ]]; then
+                label " AnyTLS Link"
                 echo
                 continue
             fi
@@ -122,7 +123,7 @@ show_client_info(){
                 continue
             fi
             value "$line"
-        done < "${MIHOMO_CLIENT_DIR}/vless.txt"
+        done < "${MIHOMO_CLIENT_DIR}/anytls.txt"
     else
         warning "未配置"
     fi
@@ -202,8 +203,8 @@ configure_mihomo_hysteria2(){
     run_script_and_pause "$MIHOMO_HY2_SCRIPT"
 }
 
-configure_mihomo_vless(){
-    run_script_and_pause "$MIHOMO_VLESS_SCRIPT"
+configure_mihomo_anytls(){
+    run_script_and_pause "$MIHOMO_ANYTLS_SCRIPT"
 }
 
 configure_mihomo_shadowsocks(){
@@ -292,19 +293,38 @@ uninstall_mihomo_hysteria2(){
     pause
 }
 
-uninstall_mihomo_vless(){
+remove_mihomo_anytls_assets(){
+    if [[ ! -d "${MIHOMO_ANYTLS_SELF_SIGNED_DIR}" ]]; then
+        return 0
+    fi
+
+    case "${MIHOMO_ANYTLS_SELF_SIGNED_DIR}" in
+        "${MIHOMO_DIR}/certs/anytls-selfsigned") ;;
+        *)
+            error "拒绝删除异常的 AnyTLS 自签证书目录：${MIHOMO_ANYTLS_SELF_SIGNED_DIR}"
+            return 1
+            ;;
+    esac
+
+    rm -rf -- "${MIHOMO_ANYTLS_SELF_SIGNED_DIR}"
+    rmdir "${MIHOMO_DIR}/certs" >/dev/null 2>&1 || true
+    success "AnyTLS 自签证书、私钥和域名记录已删除；下次安装会生成新的指纹。"
+}
+
+uninstall_mihomo_anytls(){
     local port
 
-    header "卸载 Mihomo VLESS + TCP + XTLS Vision + REALITY"
-    warning "正在卸载 Mihomo VLESS + TCP + XTLS Vision + REALITY..."
-    port=$(yaml_number_field "${MIHOMO_PROTOCOL_DIR}/vless.yaml" "port")
-    rm -f "${MIHOMO_PROTOCOL_DIR}/vless.yaml" "${MIHOMO_CLIENT_DIR}/vless.txt"
+    header "卸载 Mihomo AnyTLS"
+    warning "正在卸载 Mihomo AnyTLS..."
+    port=$(yaml_number_field "${MIHOMO_PROTOCOL_DIR}/anytls.yaml" "port")
+    rm -f "${MIHOMO_PROTOCOL_DIR}/anytls.yaml" "${MIHOMO_CLIENT_DIR}/anytls.txt"
     if ! rebuild_or_stop_mihomo; then
         pause
         return
     fi
     remove_ufw_port_rule "$port" tcp
-    remove_ufw_port_rule "$port" udp
+    remove_mihomo_anytls_assets
+    success "Mihomo AnyTLS 已卸载。"
     pause
 }
 
@@ -371,10 +391,10 @@ show_mihomo_core(){
     echo
     section "协议配置" "$YELLOW"
     echo
-    if [[ -f "${MIHOMO_CLIENT_DIR}/vless.txt" ]]; then
-        kv "VLESS + TCP + XTLS Vision + REALITY    :" "已配置（UDP 已开启）"
+    if [[ -f "${MIHOMO_CLIENT_DIR}/anytls.txt" ]]; then
+        kv "AnyTLS           :" "已配置（UDP over TCP 已开启）"
     else
-        kv "VLESS + TCP + XTLS Vision + REALITY    :" "未配置"
+        kv "AnyTLS           :" "未配置"
     fi
 
     if [[ -f "${MIHOMO_CLIENT_DIR}/hysteria2.txt" ]]; then
@@ -424,7 +444,7 @@ restart_mihomo(){
 }
 
 uninstall_mihomo(){
-    local hysteria2_port vless_port shadowsocks_port
+    local hysteria2_port anytls_port shadowsocks_port
 
     header "卸载 Mihomo"
     warning "即将卸载 Mihomo，并删除其配置和连接信息。"
@@ -436,14 +456,13 @@ uninstall_mihomo(){
     fi
 
     hysteria2_port=$(yaml_number_field "${MIHOMO_PROTOCOL_DIR}/hysteria2.yaml" "port")
-    vless_port=$(yaml_number_field "${MIHOMO_PROTOCOL_DIR}/vless.yaml" "port")
+    anytls_port=$(yaml_number_field "${MIHOMO_PROTOCOL_DIR}/anytls.yaml" "port")
     shadowsocks_port=$(yaml_number_field "${MIHOMO_PROTOCOL_DIR}/shadowsocks.yaml" "port")
     remove_mihomo_hysteria2_port_hopping "${hysteria2_port:-${MIHOMO_HY2_HOP_START}}"
     if command -v systemctl >/dev/null 2>&1; then
         systemctl disable --now "$MIHOMO_SERVICE" 2>/dev/null || true
     fi
-    remove_ufw_port_rule "$vless_port" tcp
-    remove_ufw_port_rule "$vless_port" udp
+    remove_ufw_port_rule "$anytls_port" tcp
     remove_ufw_port_rule "$shadowsocks_port" tcp
     remove_ufw_port_rule "$shadowsocks_port" udp
     rm -f /usr/local/bin/mihomo /etc/systemd/system/mihomo.service
@@ -467,8 +486,8 @@ mihomo_menu(){
         menu_item "1" "安装 / 更新 Mihomo"
         menu_item "2" "查看 Mihomo 核心"
         menu_item "3" "查看 Mihomo 日志"
-        menu_item "4" "安装 VLESS + TCP + XTLS Vision + REALITY"
-        menu_item "5" "卸载 VLESS + TCP + XTLS Vision + REALITY"
+        menu_item "4" "安装 AnyTLS（独立自签证书）"
+        menu_item "5" "卸载 AnyTLS"
         menu_item "6" "安装 Hysteria2"
         menu_item "7" "卸载 Hysteria2"
         menu_item "8" "安装 Shadowsocks"
@@ -486,8 +505,8 @@ mihomo_menu(){
             1) install_mihomo ;;
             2) show_mihomo_core ;;
             3) show_mihomo_logs ;;
-            4) configure_mihomo_vless ;;
-            5) uninstall_mihomo_vless ;;
+            4) configure_mihomo_anytls ;;
+            5) uninstall_mihomo_anytls ;;
             6) configure_mihomo_hysteria2 ;;
             7) uninstall_mihomo_hysteria2 ;;
             8) configure_mihomo_shadowsocks ;;
