@@ -486,7 +486,7 @@ mihomo_menu(){
         menu_item "1" "安装 / 更新 Mihomo"
         menu_item "2" "查看 Mihomo 核心"
         menu_item "3" "查看 Mihomo 日志"
-        menu_item "4" "安装 AnyTLS（独立自签证书）"
+        menu_item "4" "安装 AnyTLS"
         menu_item "5" "卸载 AnyTLS"
         menu_item "6" "安装 Hysteria2"
         menu_item "7" "卸载 Hysteria2"
